@@ -31,8 +31,12 @@ def main():
         if len(args) < 2:
             print(__doc__)
             return 2
-        r = b.connect(type="telnet", host=args[1],
-                      port=int(args[2]) if len(args) > 2 else 23, wait_after=1.5)
+        try:
+            telnet_port = int(args[2]) if len(args) > 2 else 23
+        except ValueError:
+            print(__doc__)
+            return 2
+        r = b.connect(type="telnet", host=args[1], port=telnet_port, wait_after=1.5)
     else:
         if len(args) > 1:
             try:
