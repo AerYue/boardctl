@@ -51,18 +51,36 @@ MAX_BUFFER = 1_000_000  # per-session ring buffer ceiling (bytes)
 TRIM_TO = 600_000       # keep this many bytes after a trim
 MAX_SESSIONS = 16
 
+
+def _guide_path() -> str:
+    """Absolute path of AI_GUIDE.md, for repo (src/../) and flat layouts alike."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.join(os.path.dirname(here), "AI_GUIDE.md")
+    return repo if os.path.isfile(repo) else os.path.join(here, "AI_GUIDE.md")
+
+
+_AI_GUIDE = _guide_path()
+
 mcp = FastMCP(
     "boardctl",
     instructions=(
-        "Control Linux development boards over serial (UART), SSH and telnet.\n"
-        "Typical flow: serial_list() -> connect(type='serial', serial_port='COM3') -> "
-        "expect(['login:', '#']) -> send('root') -> send('uname -a') -> close().\n"
-        "Sessions stay open between tool calls. Use expect() to wait for prompts, "
-        "read() to drain boot logs, send() with wait=0 for long-running commands.\n"
-        "Use share(session_id) to expose a session on a local telnet port so a "
-        "human can watch and type in their own terminal app (Xshell/MobaXterm/"
-        "WindTerm) on the very same console.\n"
-        "Full operating guide for agents: AI_GUIDE.md in the project root."
+        "Board console control (serial/SSH/telnet) for AI agents. Sessions are stateful; "
+        "output is a raw byte stream -- wait for markers with expect(), never assume "
+        "request-response.\n"
+        "Core rules:\n"
+        "- Full operating guide, read it before first use: " + _AI_GUIDE + "\n"
+        "- SHARE PROACTIVELY: right after connect(), offer share(session_id) and tell the "
+        "user they can open the very same console in their own terminal app "
+        "(WindTerm/Xshell/MobaXterm/PuTTY, Telnet 127.0.0.1:<listen_port>). "
+        "Users usually don't know this feature exists.\n"
+        "- SERIAL PORTS ARE EXCLUSIVE: one COM port = one session. Check sessions() before "
+        "connect(), close stale sessions first; 'access denied' on a port means someone "
+        "still holds it (old session, share_console.py, or the user's terminal app).\n"
+        "- Long commands: send(..., wait=0) then expect([\"MARK-0\", \"ERROR\"]); put $? in "
+        "the marker (echo \"MARK-$?\") so it can never match the command echo.\n"
+        "- SSH long tasks: keepalive=30. Boards offering only ssh-rsa (old Dropbear) are "
+        "handled automatically.\n"
+        "- control_lines() hard-resets boards -- only on purpose. close(session_id) when done."
     ),
 )
 
@@ -757,7 +775,9 @@ def connect(
     Exactly one of the transports:
     - type="serial": serial_port is a COM port (e.g. "COM3") or pyserial URL
       ("loop://", "socket://ip:port", "rfc2217://..."). baudrate default 115200.
-      dtr/rts force initial control-line states (board reset / bootloader entry).
+      COM ports are exclusive: check sessions() and close old sessions on the
+      same port before connecting. dtr/rts force initial control-line states
+      (board reset / bootloader entry).
     - type="ssh": host, username, and password OR key_path (+key_passphrase).
       Interactive login shell (invoke_shell), so prompts/confirmations work.
       legacy_algos=True re-enables ssh-rsa (SHA-1) host keys for pre-2015
@@ -948,11 +968,12 @@ def share(session_id: str, port: int = 0) -> dict:
     watch and type in any terminal app (Xshell / MobaXterm / WindTerm / PuTTY)
     while the agent works on the same console through MCP.
 
-    Board output is mirrored to all clients (up to 4); client input goes to
-    the board; each client receives the last ~4 KB of history on connect.
-    Bound to localhost only. Returns listen_port -- point the terminal's
-    Telnet session at 127.0.0.1:<listen_port>. Sharing stops with unshare()
-    or when the session is closed.
+    Offer this proactively right after connect() -- users usually don't know
+    the feature exists. Board output is mirrored to all clients (up to 4);
+    client input goes to the board; each client receives the last ~4 KB of
+    history on connect. Bound to localhost only. Returns listen_port -- point
+    the terminal's Telnet session at 127.0.0.1:<listen_port>. Sharing stops
+    with unshare() or when the session is closed.
     """
     try:
         s = _get(session_id)
@@ -1100,6 +1121,16 @@ def sftp_download(
                 client.close()
             except Exception:
                 pass
+
+
+@mcp.resource("boardctl://ai-guide")
+def ai_guide() -> str:
+    """Full operating guide for agents (AI_GUIDE.md, kept next to the server)."""
+    try:
+        with open(_AI_GUIDE, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return "AI_GUIDE.md not found (expected at: %s)" % _AI_GUIDE
 
 
 def main() -> None:

@@ -103,7 +103,7 @@ ZCode 用户级配置 `~/.zcode/cli/config.json`，在 MCP servers 节点加入�
 **第 4 步：验证**
 
 ```
-python tests/test_boardctl.py        # 60/60 checks passed（无需真实硬件）
+python tests/test_boardctl.py        # 62/62 checks passed（无需真实硬件）
 ```
 
 或直接让 AI 调一次 `serial_list()`，能列出 COM 口即为连通。
@@ -190,7 +190,7 @@ legacy 垫片重试一次，成功后结果标记 `"legacy_algos": true`；也�
 ## 测试与维护
 
 ```
-python tests/test_boardctl.py        # 端到端 60 项检查，无需真实硬件
+python tests/test_boardctl.py        # 端到端 62 项检查，无需真实硬件
                                      # （假 telnetd + 假 sshd + ssh-rsa-only 老 sshd + 串口回环）
 python src/board_probe.py COM6 115200          # 真机串口探测
 python src/board_probe_ssh.py 192.168.5.10     # 真机 SSH 冒烟（自动试常见口令）
@@ -213,7 +213,7 @@ boardctl/
 │   ├── board_probe.py       # 串口探测脚本
 │   └── board_probe_ssh.py   # SSH 冒烟脚本
 └── tests/
-    └── test_boardctl.py     # 端到端测试（60 项，无需硬件）
+    └── test_boardctl.py     # 端到端测试（62 项，无需硬件）
 ```
 
 ## 许可证

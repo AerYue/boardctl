@@ -362,6 +362,15 @@ async def main() -> int:
                       "control_lines", "share", "unshare"]:
                 check(f"tool:{n}", n in names, f"have {sorted(names)}")
 
+            # ---- resources: AI guide reachable via MCP ----------------------
+            ress = await s.list_resources()
+            uris = {str(r.uri) for r in ress.resources}
+            check("resource:ai-guide listed", "boardctl://ai-guide" in uris, str(uris)[:200])
+            rres = await s.read_resource("boardctl://ai-guide")
+            text = rres.contents[0].text if getattr(rres, "contents", None) else ""
+            check("resource:ai-guide readable",
+                  "expect" in text and "share" in text and "主动提起" in text, text[:120])
+
             res = await call(s, "serial_list", {})
             check("serial_list", res.get("ok") and isinstance(res.get("ports"), list), str(res)[:200])
 

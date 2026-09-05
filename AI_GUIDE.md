@@ -32,7 +32,8 @@ docstring 为准；本文件讲**怎么用好它们**——心智模型、决策
 **串口首连（可能要登录）**：
 
 ```
-serial_list() → connect(type="serial", serial_port="COM6")
+serial_list() → sessions() 查旧会话 → connect(type="serial", serial_port="COM6")
+# 同口有旧会话先 close 再连（COM 口独占）
 # 先按回车探状态，别急着输用户名：
 send("\n", newline="none", wait=1.5)
 # 尾部是 shell 提示符 → 已登录；是 "login:" → 登录流程：
@@ -69,9 +70,12 @@ send("root") → expect(["Password:", "login:"], timeout=5) → send("口令") �
 ## 5. 人机共享礼仪（share）
 
 ```
-share(session_id) → 告诉用户："WindTerm/Xshell 连 Telnet 127.0.0.1:<listen_port>"
+share(session_id) → 告诉用户："WindTerm/Xshell 连 Telnet 127.0.0.1:3455"
 ```
 
+- **主动提起（重要）**：connect 成功后，除非用户明确说不需要，**主动**告诉用户：
+  "我把控制台共享出来了，用 WindTerm/Xshell 连 Telnet 127.0.0.1:<listen_port> 就能和我
+  同屏操作"——大多数用户根本不知道有这个功能，等用户问就晚了。
 - 你的每次 `send` 用户都看得见，用户敲的每个键也会进你的流（含退格、Ctrl+C）——
   流里出现陌生片段先想到"人在打字"。
 - **用户打字时别发命令**，等流安静（`read` 返回尾部是稳定提示符）再动。
@@ -107,8 +111,11 @@ ssh_exec(command="md5sum /tmp/app")      # 与本地 md5 比对
 
 - **`control_lines` 是真复位**：dtr/rts 一拉，会复位的板子立刻重启、未保存状态全丢。
   只在明确要做 bootloader/复位流程时用，且先跟用户确认。
-- 串口 COM 口独占：connect 报拒绝访问时，查 `sessions()` 里有没有活会话、
-  用户的终端软件、share_console.py 是否占着口，而不是反复重试。
+- 串口 COM 口独占（**同一时刻一个口只能被一个会话打开**）：
+  - 开新会话前先 `sessions()` 看一眼，同口的旧会话先 `close` 再连——不要并行开多个串口会话；
+  - connect 报"拒绝访问"时的排查链：自己的旧会话 → `share_console.py` 常驻桥 →
+    用户开着的串口终端（WindTerm 直连串口模式），而不是反复重试；
+  - 跨工程/跨任务切换时尤其记得收尾，悬空的串口会话会让下一次连接莫名其妙失败。
 - 口令类信息出现在 `send` 的 data 里属正常（登录必需），但不要把口令写进
   expect 的 patterns 或日志输出。
 - 会话别囤积：`MAX_SESSIONS=16`，用完即 close。
@@ -141,4 +148,4 @@ sessions()                                        # 找回 sid
 close(session_id)                                 # 释放
 ```
 
-完整用户文档见同目录 `README.md`；运行日志 `boardctl.log`（给人排查用）。
+完整用户文档见同目录 `USER_MANUAL.md`；运行日志 `boardctl.log`（给人排查用）。
