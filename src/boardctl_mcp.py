@@ -325,8 +325,9 @@ class SerialSession(Session):
 
     def _send_raw(self, payload: bytes) -> None:
         with self._wlock:  # bridge keystrokes and agent sends share one port
+            # no flush(): pyserial's flush() ignores write_timeout and can spin
+            # forever on a wedged adapter, deadlocking every sender on _wlock
             self.ser.write(payload)
-            self.ser.flush()
 
     def _close_io(self) -> None:
         self.ser.close()
@@ -366,11 +367,15 @@ class SSHSession(Session):
         super().__init__(desc=f"ssh://{username}@{host}:{port}", encoding=encoding)
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect(host, port=port, username=username, password=password,
-                            key_filename=key_path, passphrase=key_passphrase,
-                            timeout=connect_timeout, banner_timeout=30, auth_timeout=30,
-                            allow_agent=False, look_for_keys=False,
-                            transport_factory=_legacy_transport_factory() if legacy_algos else None)
+        try:
+            self.client.connect(host, port=port, username=username, password=password,
+                                key_filename=key_path, passphrase=key_passphrase,
+                                timeout=connect_timeout, banner_timeout=30, auth_timeout=30,
+                                allow_agent=False, look_for_keys=False,
+                                transport_factory=_legacy_transport_factory() if legacy_algos else None)
+        except Exception:
+            self.client.close()  # connect() leaves its half-open Transport behind on failure
+            raise
         try:
             if keepalive and keepalive > 0:
                 self.client.get_transport().set_keepalive(keepalive)
@@ -748,19 +753,26 @@ def _get(sid: str) -> Session:
 
 
 def _register(s: Session) -> None:
-    with SESSIONS_LOCK:
-        if sum(1 for x in SESSIONS.values() if x.alive) >= MAX_SESSIONS:
-            # under pressure, reclaim registry slots held by dead sessions --
-            # close() also releases the COM ports / sockets they still hold
-            for x in [x for x in SESSIONS.values() if not x.alive]:
-                SESSIONS.pop(x.id, None)
-                try:
-                    x.close()
-                except Exception:
-                    pass
-        if sum(1 for x in SESSIONS.values() if x.alive) >= MAX_SESSIONS:
-            raise RuntimeError(f"too many open sessions (max {MAX_SESSIONS}); close some first")
-        SESSIONS[s.id] = s
+    evict: list[Session] = []
+    try:
+        with SESSIONS_LOCK:
+            if sum(1 for x in SESSIONS.values() if x.alive) >= MAX_SESSIONS:
+                # under pressure, reclaim registry slots held by dead sessions --
+                # close() also releases the COM ports / sockets they still hold
+                evict = [x for x in SESSIONS.values() if not x.alive]
+                for x in evict:
+                    SESSIONS.pop(x.id, None)
+            if sum(1 for x in SESSIONS.values() if x.alive) >= MAX_SESSIONS:
+                raise RuntimeError(
+                    f"too many open sessions (max {MAX_SESSIONS}); close some first")
+            SESSIONS[s.id] = s
+    finally:
+        # close() may join threads (paramiko stop_thread); keep it out of the lock
+        for x in evict:
+            try:
+                x.close()
+            except Exception:
+                pass
 
 
 def _ssh_client(host: str, port: int, username: str, password: Optional[str],
@@ -768,11 +780,15 @@ def _ssh_client(host: str, port: int, username: str, password: Optional[str],
                 connect_timeout: float, legacy_algos: bool = False) -> paramiko.SSHClient:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(host, port=port, username=username, password=password,
-                   key_filename=key_path, passphrase=key_passphrase,
-                   timeout=connect_timeout, banner_timeout=30, auth_timeout=30,
-                   allow_agent=False, look_for_keys=False,
-                   transport_factory=_legacy_transport_factory() if legacy_algos else None)
+    try:
+        client.connect(host, port=port, username=username, password=password,
+                       key_filename=key_path, passphrase=key_passphrase,
+                       timeout=connect_timeout, banner_timeout=30, auth_timeout=30,
+                       allow_agent=False, look_for_keys=False,
+                       transport_factory=_legacy_transport_factory() if legacy_algos else None)
+    except Exception:
+        client.close()  # connect() leaves its half-open Transport behind on failure
+        raise
     return client
 
 
@@ -1131,11 +1147,11 @@ def ssh_exec(
         timed_out = False
         while True:
             # drain what arrived; keep buffering bounded (tail semantics)
-            while chan.recv_ready():
+            while chan.recv_ready() and time.monotonic() < deadline:
                 out_b += chan.recv(65_536)
                 if len(out_b) > 512_000:
                     del out_b[:-262_144]
-            while chan.recv_stderr_ready():
+            while chan.recv_stderr_ready() and time.monotonic() < deadline:
                 err_b += chan.recv_stderr(65_536)
                 if len(err_b) > 512_000:
                     del err_b[:-262_144]
@@ -1146,6 +1162,18 @@ def ssh_exec(
                 timed_out = True
                 break
             time.sleep(min(0.05, remaining))
+        if not timed_out:
+            # grace drain: in-order processing means post-exit-status data is
+            # usually already queued; give the race window one last pass
+            time.sleep(0.05)
+            while chan.recv_ready():
+                out_b += chan.recv(65_536)
+                if len(out_b) > 512_000:
+                    del out_b[:-262_144]
+            while chan.recv_stderr_ready():
+                err_b += chan.recv_stderr(65_536)
+                if len(err_b) > 512_000:
+                    del err_b[:-262_144]
         out = _cap_bytes(bytes(out_b))
         err = _cap_bytes(bytes(err_b))
         if timed_out:

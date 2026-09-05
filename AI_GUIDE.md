@@ -23,7 +23,7 @@ docstring 为准；本文件讲**怎么用好它们**——心智模型、决策
 | 要看提示符/确认/交互流程，或走串口 | `connect` + `send`/`expect` |
 | 等某件事发生（登录提示、编译完成、错误出现） | `expect`（控制台自动化核心） |
 | 收异步输出（开机日志、内核消息） | `read` |
-| 传文件 | `sftp_upload/download`；板子没 sftp-server 时走 §7 配方 |
+| 传文件 | `sftp_upload/download`；板子没 sftp-server 时走 §6 配方 |
 | 人要盯着/一起操作 | `share`，把 `listen_port` 告诉用户 |
 | 复位板子/进 bootloader | `control_lines`（谨慎，见 §8） |
 
@@ -154,4 +154,4 @@ sessions()                                        # 找回 sid
 close(session_id)                                 # 释放
 ```
 
-完整用户文档见同目录 `USER_MANUAL.md`；运行日志 `boardctl.log`（给人排查用）。
+完整用户文档见仓库根目录的 `README.md`（开发目录另有 `USER_MANUAL.md`）；运行日志 `boardctl.log`（给人排查用）。

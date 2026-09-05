@@ -103,7 +103,7 @@ ZCode 用户级配置 `~/.zcode/cli/config.json`，在 MCP servers 节点加入�
 **第 4 步：验证**
 
 ```
-python tests/test_boardctl.py        # 62/62 checks passed（无需真实硬件）
+python tests/test_boardctl.py        # 67/67 checks passed（无需真实硬件）
 ```
 
 或直接让 AI 调一次 `serial_list()`，能列出 COM 口即为连通。
@@ -179,7 +179,7 @@ legacy 垫片重试一次，成功后结果标记 `"legacy_algos": true`；也�
 | `could not open port 'COMxx'` | 口号不存在/拼错，用 `serial_list()` 核对（CH340/FTDI/CP210x 的 USB 串口通常描述可见） |
 | 串口打开报拒绝访问 | **COM 口独占**：被别的进程占着——之前未关的会话、share_console.py、其他终端软件。关掉即可 |
 | `no acceptable host key` | 老板子只提供 ssh-rsa。已自动重试兼容；若仍失败，板子连 ssh-rsa 都没有，需升级板子 sshd |
-| 更老板子 SSH 彻底连不上 | 只有 SHA-1 密钥交换算法（2013 年前的 Dropbear/OpenSSH 5.x），paramiko ≥5 已无此实现也无法垫片 | 走串口控制台，或给板子升级 sshd |
+| 更老板子 SSH 彻底连不上 | 只有 SHA-1 密钥交换算法（2013 年前的 Dropbear/OpenSSH 5.x），paramiko ≥5 已无此实现也无法垫片——走串口控制台，或给板子升级 sshd |
 | `Authentication failed` | 口令不对。可用串口控制台 `echo root:新口令 \| chpasswd` 重设 |
 | SFTP 报 `EOF during negotiation` | 板子没装 sftp-server（dropbear 需另装 openssh-sftp-server）；走 base64 过控制台 |
 | 命令里中文变乱码 | 板子 busybox shell 是 C locale、按字节处理。控制台命令用 ASCII |
@@ -191,7 +191,7 @@ legacy 垫片重试一次，成功后结果标记 `"legacy_algos": true`；也�
 ## 测试与维护
 
 ```
-python tests/test_boardctl.py        # 端到端 62 项检查，无需真实硬件
+python tests/test_boardctl.py        # 端到端 67 项检查，无需真实硬件
                                      # （假 telnetd + 假 sshd + ssh-rsa-only 老 sshd + 串口回环）
 python src/board_probe.py COM6 115200          # 真机串口探测
 python src/board_probe_ssh.py 192.168.5.10     # 真机 SSH 冒烟（自动试常见口令）
@@ -208,13 +208,14 @@ boardctl/
 ├── LICENSE              # MIT
 ├── requirements.txt     # 依赖清单
 ├── .gitignore
+├── .gitattributes       # 换行符与二进制属性
 ├── src/
 │   ├── boardctl_mcp.py      # server 主体（唯一必需的代码文件）
 │   ├── share_console.py     # 独立共享控制台
 │   ├── board_probe.py       # 串口探测脚本
 │   └── board_probe_ssh.py   # SSH 冒烟脚本
 └── tests/
-    └── test_boardctl.py     # 端到端测试（62 项，无需硬件）
+    └── test_boardctl.py     # 端到端测试（67 项，无需硬件）
 ```
 
 ## 许可证

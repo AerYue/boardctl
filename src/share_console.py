@@ -22,9 +22,15 @@ def main():
         print(__doc__)
         return 2
     if args[0] == "--ssh":
+        if len(args) < 3:
+            print(__doc__)
+            return 2
         r = b.connect(type="ssh", host=args[1], username=args[2],
                       password=args[3] if len(args) > 3 else None, wait_after=1.5)
     elif args[0] == "--telnet":
+        if len(args) < 2:
+            print(__doc__)
+            return 2
         r = b.connect(type="telnet", host=args[1],
                       port=int(args[2]) if len(args) > 2 else 23, wait_after=1.5)
     else:

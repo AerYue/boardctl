@@ -103,30 +103,41 @@ class Console:
         self.write(b"root@board:~# ")
 
 
-def strip_iac(data: bytes) -> bytes:
-    """Remove telnet negotiation from client->server input."""
+def strip_iac(data: bytes) -> tuple[bytes, bytes]:
+    """Remove telnet negotiation from client->server input.
+
+    Returns (clean_output, pending_tail): pending_tail holds an incomplete
+    IAC/SB sequence so sequences split across recv chunks are handled.
+    """
     out = bytearray()
     i = 0
-    while i < len(data):
+    n = len(data)
+    while i < n:
         b = data[i]
-        if b == 0xFF and i + 1 < len(data):
+        if b == 0xFF:
+            if i + 1 >= n:
+                return bytes(out), data[i:]           # lone IAC: hold
             nxt = data[i + 1]
             if nxt in (0xFB, 0xFC, 0xFD, 0xFE):
+                if i + 2 >= n:
+                    return bytes(out), data[i:]       # IAC cmd without option
                 i += 3
                 continue
             if nxt == 0xFF:
                 out.append(0xFF)
                 i += 2
                 continue
-            if nxt == 0xFA:  # SB ... IAC SE
+            if nxt == 0xFA:                            # SB ... IAC SE
                 j = data.find(b"\xff\xf0", i)
-                i = j + 2 if j != -1 else len(data)
+                if j == -1:
+                    return bytes(out), data[i:]       # unterminated SB: hold all
+                i = j + 2
                 continue
             i += 2
             continue
         out.append(b)
         i += 1
-    return bytes(out)
+    return bytes(out), b""
 
 
 # ---------------------------------------------------------------- fake telnetd
@@ -150,13 +161,14 @@ def fake_telnet_server():
             con = Console(lambda b: conn.sendall(b), conn.close)
             con.start()
             try:
+                pending = b""
                 while not con.closed:
                     data = conn.recv(1024)
                     if not data:
                         break
-                    data = strip_iac(data)
-                    if data:
-                        con.feed(data)
+                    clean, pending = strip_iac(pending + data)
+                    if clean:
+                        con.feed(clean)
             except OSError:
                 pass
             try:
@@ -271,10 +283,16 @@ class BoardSSHServer(paramiko.ServerInterface):
         time.sleep(0.1)  # let the transport thread send the exec success reply first
         cmd = command.decode("utf-8", "replace") if isinstance(command, bytes) else command
         if cmd == "slow-stream":  # for wall-clock timeout tests
-            for i in range(6):
-                time.sleep(0.5)
-                channel.sendall(f"chunk-{i}\n".encode())
-            channel.send_exit_status(0)
+            try:
+                for i in range(6):
+                    time.sleep(0.5)
+                    channel.sendall(f"chunk-{i}\n".encode())
+            except OSError:
+                pass  # client gave up (timeout test closes the transport)
+            try:
+                channel.send_exit_status(0)
+            except OSError:
+                pass
             channel.close()
             return
         if cmd.startswith("echo "):
