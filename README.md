@@ -60,7 +60,7 @@ boardctl 是一个 MCP server，让 AI 编程助手（ZCode、Claude、Cursor �
 **第 1 步：获取代码**
 
 ```
-git clone https://github.com/<you>/boardctl.git
+git clone https://github.com/AerYue/boardctl.git
 # 或下载 zip 解压
 ```
 
@@ -179,6 +179,7 @@ legacy 垫片重试一次，成功后结果标记 `"legacy_algos": true`；也�
 | `could not open port 'COMxx'` | 口号不存在/拼错，用 `serial_list()` 核对（CH340/FTDI/CP210x 的 USB 串口通常描述可见） |
 | 串口打开报拒绝访问 | **COM 口独占**：被别的进程占着——之前未关的会话、share_console.py、其他终端软件。关掉即可 |
 | `no acceptable host key` | 老板子只提供 ssh-rsa。已自动重试兼容；若仍失败，板子连 ssh-rsa 都没有，需升级板子 sshd |
+| 更老板子 SSH 彻底连不上 | 只有 SHA-1 密钥交换算法（2013 年前的 Dropbear/OpenSSH 5.x），paramiko ≥5 已无此实现也无法垫片 | 走串口控制台，或给板子升级 sshd |
 | `Authentication failed` | 口令不对。可用串口控制台 `echo root:新口令 \| chpasswd` 重设 |
 | SFTP 报 `EOF during negotiation` | 板子没装 sftp-server（dropbear 需另装 openssh-sftp-server）；走 base64 过控制台 |
 | 命令里中文变乱码 | 板子 busybox shell 是 C locale、按字节处理。控制台命令用 ASCII |

@@ -4,10 +4,11 @@ Usage: python board_probe.py COM6 115200
 """
 
 import json
+import os
 import re
 import sys
 
-sys.path.insert(0, r"F:\AI_Owner\ai_tools\boardctl")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import boardctl_mcp as b  # noqa: E402
 
 

@@ -88,10 +88,12 @@ share(session_id) → 告诉用户："WindTerm/Xshell 连 Telnet 127.0.0.1:3455"
 - 报 `EOF during negotiation` = 板子没 sftp-server，改走 **base64 过控制台**：
 
 ```
-# 推文件（PC → 板子），分块 ~1KB/行，单引号防展开：
-#   本地: certutil -encode app.bin app.b64   (Windows) 或 base64 app.bin > app.b64
-#   板上: 先 rm /tmp/app.b64
-send("echo 'AAAA' >> /tmp/app.b64")     # 每块一条，逐块发
+# 推文件（PC → 板子）。PC 侧先得到"纯 base64"：
+#   python -c "import base64;print(base64.b64encode(open('app.bin','rb').read()).decode())" > app.b64
+#   （别用 certutil -encode：它输出带 BEGIN/END 头，直接解码会损坏；Git Bash 的 base64 可用）
+#   板上先 rm /tmp/app.b64
+# 逐块发送：每条 echo ≤800 字符——板子 tty 行缓冲有限（busybox 行编辑 ~1024），超长行会被截断
+send("echo 'AAAA' >> /tmp/app.b64")     # 每块一条，单引号防展开，逐块发
 send("base64 -d /tmp/app.b64 > /tmp/app")
 ssh_exec(command="md5sum /tmp/app")      # 与本地 md5 比对
 # 拉文件（板子 → PC）：base64 /tmp/log.txt 分块读回，本地拼接后解码
@@ -105,6 +107,9 @@ ssh_exec(command="md5sum /tmp/app")      # 与本地 md5 比对
 - 交互会话：`connect(type="ssh", ..., keepalive=30)`——长任务必带 keepalive。
 - 老板子（Dropbear 2014–2017）：遇 `no acceptable host key` 会**自动**带 ssh-rsa 垫片重试，
   成功后返回带 `"legacy_algos": true`，照常用即可，无需特殊处理。
+- 更老的板子（2013 前的 Dropbear、OpenSSH 5.x）可能只有 SHA-1 **密钥交换**算法
+  （diffie-hellman-group1/14-sha1）——paramiko ≥5 连这类 KEX 的实现都删了，垫片也无能为力，
+  SSH 彻底无解：走串口，或给板子升级 sshd。
 - 交互会话里判断命令成功：`echo "RC-$?"` + `expect(["RC-0"])`（同 §4 技巧）。
 
 ## 8. 安全红线
@@ -132,7 +137,7 @@ ssh_exec(command="md5sum /tmp/app")      # 与本地 md5 比对
 | `unknown session_id` | 会话已关/记错 | `sessions()` 重新发现 |
 | 输出全是乱码 | 波特率不对 | 换 9600/57600/230400 重连 |
 | 中文命令变乱码/铃响 | 板子 C locale | 控制台只用 ASCII |
-| `timeout` 且 alive=false | 板子/连接死了 | `read` 看尾部，重连 |
+| `timeout` 且 alive=false | 板子/连接死了 | 先 `close` 旧会话（释放槽位和 COM 口），`read` 看尾部定位原因，再重连 |
 
 ## 10. 最小速查卡
 

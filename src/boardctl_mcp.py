@@ -443,8 +443,11 @@ class _TelnetCodec:
     def _handle_sub(self, sb: bytearray) -> None:
         # terminal-type negotiation: IAC SB TTYPE SEND IAC SE -> reply IS "vt100"
         if len(sb) >= 2 and sb[0] == _TN_TTYPE and sb[1] == 1:
-            self._send(bytes([_TN_IAC, _TN_SB, _TN_TTYPE, 0]) + b"vt100" +
-                       bytes([_TN_IAC, _TN_SE]))
+            try:
+                self._send(bytes([_TN_IAC, _TN_SB, _TN_TTYPE, 0]) + b"vt100" +
+                           bytes([_TN_IAC, _TN_SE]))
+            except OSError:  # peer vanished mid-negotiation
+                pass
 
     def feed(self, data: bytes) -> bytes:
         out = bytearray()
@@ -665,6 +668,9 @@ class ConsoleBridge:
             self.sess.remove_tap(self.tap_id)
         except Exception:
             pass
+        with BRIDGE_LOCK:   # self-deregister (e.g. accept loop ended on session death)
+            if BRIDGES.get(self.sess.id) is self:
+                BRIDGES.pop(self.sess.id, None)
 
 
 atexit.register(lambda: [br.close() for br in list(BRIDGES.values())])
@@ -825,6 +831,8 @@ def connect(
         try:
             s._start()
         except Exception:
+            with SESSIONS_LOCK:
+                SESSIONS.pop(s.id, None)  # don't leak the slot on failed start
             s.close()
             raise
         initial = s.read(timeout=max(0.0, wait_after))
@@ -977,12 +985,21 @@ def share(session_id: str, port: int = 0) -> dict:
     """
     try:
         s = _get(session_id)
+        if not s.alive:
+            return {"ok": False, "error": f"session {session_id} is dead "
+                    f"({s.error or 'closed'}); reconnect first"}
         with BRIDGE_LOCK:
             existing = BRIDGES.get(session_id)
+            if existing and existing.stop.is_set():   # stale bridge from a died session
+                BRIDGES.pop(session_id, None)
+                existing = None
             if existing:
-                return {"ok": True, "session_id": session_id,
-                        "listen_port": existing.port, "clients": len(existing.clients),
-                        "note": "already shared"}
+                res = {"ok": True, "session_id": session_id,
+                       "listen_port": existing.port, "clients": len(existing.clients),
+                       "note": "already shared"}
+                if port and port != existing.port:
+                    res["note"] += f" (requested port {port} ignored)"
+                return res
             br = ConsoleBridge(s, port)
             BRIDGES[session_id] = br
         _log.info("session %s shared on 127.0.0.1:%d", session_id, br.port)
