@@ -408,8 +408,12 @@ class SSHSession(Session):
                 n = self.chan.send(payload)
                 if n <= 0:
                     self._die("ssh send failed")
-                    return
+                    break
                 payload = payload[n:]
+            if payload:
+                # dead session: surface it (serial/telnet raise in this spot too)
+                self._die(self.error or "ssh session closed")
+                raise OSError(f"ssh send failed: {self.error or 'session closed'}")
 
     def _close_io(self) -> None:
         try:

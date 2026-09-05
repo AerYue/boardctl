@@ -34,7 +34,14 @@ def main():
         r = b.connect(type="telnet", host=args[1],
                       port=int(args[2]) if len(args) > 2 else 23, wait_after=1.5)
     else:
-        baud = int(args[1]) if len(args) > 1 else 115200
+        if len(args) > 1:
+            try:
+                baud = int(args[1])
+            except ValueError:
+                print(__doc__)
+                return 2
+        else:
+            baud = 115200
         r = b.connect(type="serial", serial_port=args[0], baudrate=baud, wait_after=1.5)
     if not r.get("ok"):
         print("connect failed:", r.get("error"))
