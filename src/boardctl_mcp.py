@@ -107,6 +107,7 @@ class Session:
         self._read_off = 0    # cursor consumed by read()/send()
         self._expect_off = 0  # cursor scanned by expect()
         self._taps: dict[str, object] = {}  # live mirrors, see add_tap()
+        self._wlock = threading.Lock()      # serializes transport writes
         self._cond = threading.Condition()
         self.alive = True
         self.error: Optional[str] = None
@@ -295,12 +296,16 @@ class SerialSession(Session):
         super().__init__(desc=f"{serial_port} @ {baudrate}", encoding=encoding)
         kwargs = dict(baudrate=baudrate, bytesize=_BYTESIZE[bytesize],
                       parity=_PARITY[parity], stopbits=_STOPBITS[stopbits],
-                      timeout=0.1, write_timeout=3.0, **_FLOW[flow])
+                      timeout=0.1, write_timeout=3.0, exclusive=True, **_FLOW[flow])
         self.ser = serial.serial_for_url(serial_port, **kwargs)
-        if dtr is not None:
-            self.ser.dtr = dtr
-        if rts is not None:
-            self.ser.rts = rts
+        try:
+            if dtr is not None:
+                self.ser.dtr = dtr
+            if rts is not None:
+                self.ser.rts = rts
+        except Exception:
+            self.ser.close()  # don't orphan a half-open port
+            raise
 
     def _reader_loop(self) -> None:
         try:
@@ -319,8 +324,9 @@ class SerialSession(Session):
             self._die()
 
     def _send_raw(self, payload: bytes) -> None:
-        self.ser.write(payload)
-        self.ser.flush()
+        with self._wlock:  # bridge keystrokes and agent sends share one port
+            self.ser.write(payload)
+            self.ser.flush()
 
     def _close_io(self) -> None:
         self.ser.close()
@@ -365,10 +371,14 @@ class SSHSession(Session):
                             timeout=connect_timeout, banner_timeout=30, auth_timeout=30,
                             allow_agent=False, look_for_keys=False,
                             transport_factory=_legacy_transport_factory() if legacy_algos else None)
-        if keepalive and keepalive > 0:
-            self.client.get_transport().set_keepalive(keepalive)
-        self.chan = self.client.invoke_shell(term="vt100", width=512, height=200)
-        self.chan.settimeout(0.5)
+        try:
+            if keepalive and keepalive > 0:
+                self.client.get_transport().set_keepalive(keepalive)
+            self.chan = self.client.invoke_shell(term="vt100", width=512, height=200)
+            self.chan.settimeout(0.5)
+        except Exception:
+            self.client.close()  # don't orphan a half-open SSH session
+            raise
 
     def _reader_loop(self) -> None:
         try:
@@ -388,12 +398,13 @@ class SSHSession(Session):
             self._die()
 
     def _send_raw(self, payload: bytes) -> None:
-        while payload and self.alive:
-            n = self.chan.send(payload)
-            if n <= 0:
-                self._die("ssh send failed")
-                return
-            payload = payload[n:]
+        with self._wlock:
+            while payload and self.alive:
+                n = self.chan.send(payload)
+                if n <= 0:
+                    self._die("ssh send failed")
+                    return
+                payload = payload[n:]
 
     def _close_io(self) -> None:
         try:
@@ -476,15 +487,19 @@ class _TelnetCodec:
             elif st == 3:
                 if b == _TN_IAC:
                     st = 4
-                else:
+                elif len(sb) <= 65_536:   # bound junk SB payloads
                     sb.append(b)
             elif st == 4:
                 if b == _TN_SE:
                     self._handle_sub(sb)
                     st = 0
+                elif b == _TN_IAC:
+                    sb.append(_TN_IAC)    # IAC IAC = escaped 0xff, stay in SB
+                    st = 3
                 else:
-                    sb.append(_TN_IAC)
-                    sb.append(b)
+                    if len(sb) <= 65_536:
+                        sb.append(_TN_IAC)
+                        sb.append(b)
                     st = 3
         self.state, self.cmd = st, cmd
         return bytes(out)
@@ -497,9 +512,17 @@ class TelnetSession(Session):
     def __init__(self, host: str, port: int, connect_timeout: float, encoding: str):
         super().__init__(desc=f"telnet://{host}:{port}", encoding=encoding)
         self.sock = socket.create_connection((host, port), timeout=connect_timeout)
-        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.sock.settimeout(0.5)
-        self._codec = _TelnetCodec(self.sock.sendall)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.sock.settimeout(0.5)
+        except OSError:
+            self.sock.close()
+            raise
+        self._codec = _TelnetCodec(self._send_reply)
+
+    def _send_reply(self, b: bytes) -> None:
+        with self._wlock:
+            self.sock.sendall(b)
 
     def _telnet_feed(self, data: bytes) -> None:
         out = self._codec.feed(data)
@@ -524,7 +547,8 @@ class TelnetSession(Session):
             self._die()
 
     def _send_raw(self, payload: bytes) -> None:
-        self.sock.sendall(payload.replace(b"\xff", b"\xff\xff"))
+        with self._wlock:
+            self.sock.sendall(payload.replace(b"\xff", b"\xff\xff"))
 
     def _close_io(self) -> None:
         self.sock.close()
@@ -553,10 +577,14 @@ class ConsoleBridge:
         self.lock = threading.Lock()
         self.clients: dict[tuple, dict] = {}
         self.srv = socket.socket()
-        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.srv.bind(("127.0.0.1", port))
-        self.srv.listen(self.MAX_CLIENTS)
-        self.srv.settimeout(0.5)
+        try:
+            self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.srv.bind(("127.0.0.1", port))
+            self.srv.listen(self.MAX_CLIENTS)
+            self.srv.settimeout(0.5)
+        except Exception:
+            self.srv.close()  # don't leak the socket on bind/listen failure
+            raise
         self.port = self.srv.getsockname()[1]
         self.tap_id = session.add_tap(self._on_board_data)
         threading.Thread(target=self._accept_loop, daemon=True).start()
@@ -592,10 +620,20 @@ class ConsoleBridge:
                     except OSError:
                         pass
                     continue
-                entry = {"sock": conn, "q": queue.Queue(maxsize=1024)}
+                entry = {"sock": conn, "q": queue.Queue(maxsize=1024),
+                         "wlock": threading.Lock()}
                 self.clients[addr] = entry
             conn.settimeout(0.5)
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:  # reap half-open clients instead of holding slots forever
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                conn.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 15_000, 3_000))  # Windows
+            except (AttributeError, OSError):
+                try:
+                    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 15)
+                    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
+                except OSError:
+                    pass
             # proactively move the terminal into remote-echo, char-at-a-time
             # mode (WILL ECHO, WILL SGA) so keystrokes go out instantly and the
             # board's echo is shown instead of client-side local echo
@@ -603,11 +641,11 @@ class ConsoleBridge:
             history = self.sess.tail(self.HISTORY)
             if history:
                 entry["q"].put(history.replace(b"\xff", b"\xff\xff"))
-            threading.Thread(target=self._client_writer, args=(entry,), daemon=True).start()
+            threading.Thread(target=self._client_writer, args=(addr, entry), daemon=True).start()
             threading.Thread(target=self._client_reader, args=(addr, entry), daemon=True).start()
         self.close()
 
-    def _client_writer(self, entry: dict) -> None:
+    def _client_writer(self, addr: tuple, entry: dict) -> None:
         q = entry["q"]
         while not self.stop.is_set():
             try:
@@ -615,13 +653,18 @@ class ConsoleBridge:
             except queue.Empty:
                 continue
             try:
-                entry["sock"].sendall(data)
+                with entry["wlock"]:
+                    entry["sock"].sendall(data)
+            except socket.timeout:  # peer stopped reading: drop it, free the slot
+                self._drop_client(addr)
+                return
             except OSError:
                 return
 
     def _client_reader(self, addr: tuple, entry: dict) -> None:
         sock = entry["sock"]
-        codec = _TelnetCodec(sock.sendall, accept_do=frozenset({_TN_ECHO, _TN_SGA}))
+        codec = _TelnetCodec(self._make_reply(entry), accept_do=frozenset({_TN_ECHO, _TN_SGA}))
+        pend = b""  # trailing CR/NUL may pair with the next chunk
         while not self.stop.is_set():
             try:
                 data = sock.recv(4096)
@@ -631,15 +674,35 @@ class ConsoleBridge:
                 break
             if not data:
                 break
-            out = codec.feed(data)
-            if out:
-                # terminals send CR LF / CR NUL for Enter; boards want CR (or LF)
-                out = out.replace(b"\r\n", b"\r").replace(b"\r\x00", b"\r").replace(b"\n", b"\r")
-                try:
-                    self.sess._send_raw(out)
-                except Exception:
-                    break
+            if pend:
+                data = pend + data
+                pend = b""
+            if data.endswith(b"\r") or data.endswith(b"\x00"):
+                pend = data[-1:]
+                data = data[:-1]
+            out = codec.feed(data) if data else b""
+            if not self._forward(out):
+                break
+        if pend and not self.stop.is_set():  # flush the held-back byte
+            self._forward(codec.feed(pend))
         self._drop_client(addr)
+
+    def _make_reply(self, entry: dict):
+        def reply(b: bytes) -> None:
+            with entry["wlock"]:
+                entry["sock"].sendall(b)
+        return reply
+
+    def _forward(self, out: bytes) -> bool:
+        if not out:
+            return True
+        # terminals send CR LF / CR NUL for Enter; boards want CR (or LF)
+        out = out.replace(b"\r\n", b"\r").replace(b"\r\x00", b"\r").replace(b"\n", b"\r")
+        try:
+            self.sess._send_raw(out)
+            return True
+        except Exception:
+            return False
 
     def _drop_client(self, addr: tuple) -> None:
         with self.lock:
@@ -686,7 +749,16 @@ def _get(sid: str) -> Session:
 
 def _register(s: Session) -> None:
     with SESSIONS_LOCK:
-        if len(SESSIONS) >= MAX_SESSIONS:
+        if sum(1 for x in SESSIONS.values() if x.alive) >= MAX_SESSIONS:
+            # under pressure, reclaim registry slots held by dead sessions --
+            # close() also releases the COM ports / sockets they still hold
+            for x in [x for x in SESSIONS.values() if not x.alive]:
+                SESSIONS.pop(x.id, None)
+                try:
+                    x.close()
+                except Exception:
+                    pass
+        if sum(1 for x in SESSIONS.values() if x.alive) >= MAX_SESSIONS:
             raise RuntimeError(f"too many open sessions (max {MAX_SESSIONS}); close some first")
         SESSIONS[s.id] = s
 
@@ -796,12 +868,13 @@ def connect(
     returns it as "output". Reuse session_id in send/read/expect/close.
     """
     legacy_used = False
+    s: Optional[Session] = None
     try:
         if type == "serial":
             if not serial_port:
                 return {"ok": False, "error": "type='serial' requires serial_port (e.g. 'COM3')"}
-            s: Session = SerialSession(serial_port, baudrate, bytesize, parity, stopbits,
-                                       flow, dtr, rts, encoding)
+            s = SerialSession(serial_port, baudrate, bytesize, parity, stopbits,
+                              flow, dtr, rts, encoding)
         elif type == "ssh":
             if not (host and username):
                 return {"ok": False, "error": "type='ssh' requires host and username"}
@@ -828,13 +901,7 @@ def connect(
         else:
             return {"ok": False, "error": f"unknown type {type!r}"}
         _register(s)
-        try:
-            s._start()
-        except Exception:
-            with SESSIONS_LOCK:
-                SESSIONS.pop(s.id, None)  # don't leak the slot on failed start
-            s.close()
-            raise
+        s._start()
         initial = s.read(timeout=max(0.0, wait_after))
         out = Session._cap(s._decode(initial), 8000)
         _log.info("connect %s ok: %s (%s)", s.id, s.desc, type)
@@ -843,6 +910,14 @@ def connect(
             res["legacy_algos"] = True
         return res
     except Exception as e:
+        if s is not None:
+            # never leak an opened transport (full registry, failed start, ...)
+            with SESSIONS_LOCK:
+                SESSIONS.pop(s.id, None)
+            try:
+                s.close()
+            except Exception:
+                pass
         _log.warning("connect(%s) failed: %s: %s", type, e.__class__.__name__, e)
         return {"ok": False, "error": f"{e.__class__.__name__}: {e}"}
 
@@ -1039,18 +1114,45 @@ def ssh_exec(
     """One-shot SSH command execution: connect, run `command`, return stdout/stderr/exit_code.
 
     Non-interactive -- no prompts. For interactive flows use connect(type='ssh')
-    with send/expect instead. Output capped at 32 KB per stream. Old boards
-    offering only ssh-rsa host keys are handled automatically (retry with the
-    legacy shim) and marked with "legacy_algos": true.
+    with send/expect instead. `timeout` is a wall-clock limit for the whole
+    command: on expiry ok=False with whatever output arrived so far (the
+    command may keep running on the board). Old boards offering only ssh-rsa
+    host keys are handled automatically (retry with the legacy shim) and
+    marked with "legacy_algos": true.
     """
     client = None
     try:
         client, legacy_used = _connect_client(host, port, username, password,
                                               key_path, key_passphrase, 10.0, legacy_algos)
         stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        out = _cap_bytes(stdout.read())
-        err = _cap_bytes(stderr.read())
-        rc = stdout.channel.recv_exit_status()
+        chan = stdout.channel
+        deadline = time.monotonic() + max(0.1, timeout)
+        out_b, err_b = bytearray(), bytearray()
+        timed_out = False
+        while True:
+            # drain what arrived; keep buffering bounded (tail semantics)
+            while chan.recv_ready():
+                out_b += chan.recv(65_536)
+                if len(out_b) > 512_000:
+                    del out_b[:-262_144]
+            while chan.recv_stderr_ready():
+                err_b += chan.recv_stderr(65_536)
+                if len(err_b) > 512_000:
+                    del err_b[:-262_144]
+            if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            time.sleep(min(0.05, remaining))
+        out = _cap_bytes(bytes(out_b))
+        err = _cap_bytes(bytes(err_b))
+        if timed_out:
+            return {"ok": False, "exit_code": None, "stdout": out, "stderr": err,
+                    "error": f"TimedOut: command did not exit within {timeout}s "
+                             f"(may still be running on the board)"}
+        rc = chan.recv_exit_status()
         res = {"ok": True, "exit_code": rc, "stdout": out, "stderr": err}
         if legacy_used:
             res["legacy_algos"] = True
@@ -1090,6 +1192,7 @@ def sftp_upload(
         client, _ = _connect_client(host, port, username, password,
                                     key_path, key_passphrase, 10.0, legacy_algos)
         sftp = client.open_sftp()
+        sftp.get_channel().settimeout(30)  # abort if the board stalls mid-transfer
         sftp.put(local_path, remote_path)
         st = sftp.stat(remote_path)
         sftp.close()
@@ -1127,6 +1230,7 @@ def sftp_download(
         client, _ = _connect_client(host, port, username, password,
                                     key_path, key_passphrase, 10.0, legacy_algos)
         sftp = client.open_sftp()
+        sftp.get_channel().settimeout(30)  # abort if the board stalls mid-transfer
         sftp.get(remote_path, local_path)
         sftp.close()
         return {"ok": True, "local_path": local_path, "size": os.path.getsize(local_path)}

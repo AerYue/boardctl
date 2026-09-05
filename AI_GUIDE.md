@@ -103,7 +103,8 @@ ssh_exec(command="md5sum /tmp/app")      # 与本地 md5 比对
 
 ## 7. SSH 专项
 
-- 免交互一条命令：`ssh_exec`（有 `exit_code`；stdout/stderr 各 32KB 上限）。
+- 免交互一条命令：`ssh_exec`（有 `exit_code`；stdout/stderr 各 32KB 上限；`timeout` 是
+  整条命令的墙钟上限，超时返回 `ok: false` 和已收到的部分输出——命令可能仍在板上跑）。
 - 交互会话：`connect(type="ssh", ..., keepalive=30)`——长任务必带 keepalive。
 - 老板子（Dropbear 2014–2017）：遇 `no acceptable host key` 会**自动**带 ssh-rsa 垫片重试，
   成功后返回带 `"legacy_algos": true`，照常用即可，无需特殊处理。

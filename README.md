@@ -167,7 +167,7 @@ legacy 垫片重试一次，成功后结果标记 `"legacy_algos": true`；也�
 | 并发会话数 | 最多 16 |
 | 会话缓冲 | 1MB 环形，超限裁剪到 600KB（最早的内容丢弃） |
 | 单次返回截断 | send 8000 字符 / read 16000 / expect 4000 / connect 8000（保留尾部，`truncated`+`dropped_chars` 标记） |
-| ssh_exec 输出 | 每流 32KB |
+| ssh_exec | 每流 32KB；整条命令受 timeout 墙钟限制（超时返回已收到的部分输出） |
 | 共享桥客户端 | 每会话 4 个，仅 127.0.0.1 |
 | 串口默认参数 | 115200-8N1，无流控 |
 | 编码 | 默认 utf-8（可按会话指定，如 `encoding="gb18030"`） |

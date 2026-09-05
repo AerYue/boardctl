@@ -270,6 +270,13 @@ class BoardSSHServer(paramiko.ServerInterface):
     def _exec(self, channel, command):
         time.sleep(0.1)  # let the transport thread send the exec success reply first
         cmd = command.decode("utf-8", "replace") if isinstance(command, bytes) else command
+        if cmd == "slow-stream":  # for wall-clock timeout tests
+            for i in range(6):
+                time.sleep(0.5)
+                channel.sendall(f"chunk-{i}\n".encode())
+            channel.send_exit_status(0)
+            channel.close()
+            return
         if cmd.startswith("echo "):
             channel.sendall(cmd[5:].encode() + b"\n")
             rc = 0
@@ -530,6 +537,35 @@ async def main() -> int:
             cli.close()
             res = await call(s, "close", {"session_id": ssid})
             check("share:close session", res.get("ok"), str(res)[:150])
+
+            # ---- session cap: full registry rejected cleanly, then recovers -
+            cap_ids = []
+            for _ in range(16):
+                res = await call(s, "connect", {"type": "serial", "serial_port": "loop://",
+                                                "baudrate": 115200, "wait_after": 0.1})
+                if res.get("ok"):
+                    cap_ids.append(res["session_id"])
+            check("cap:16 sessions open", len(cap_ids) == 16, str(len(cap_ids)))
+            res = await call(s, "connect", {"type": "serial", "serial_port": "loop://",
+                                            "baudrate": 115200, "wait_after": 0.1})
+            check("cap:17th rejected", res.get("ok") is False
+                  and "too many" in str(res.get("error", "")), str(res)[:150])
+            res = await call(s, "sessions", {})
+            check("cap:no orphan on reject", res.get("count") == 16, str(res)[:200])
+            for sid in cap_ids:
+                await call(s, "close", {"session_id": sid})
+            res = await call(s, "connect", {"type": "serial", "serial_port": "loop://",
+                                            "baudrate": 115200, "wait_after": 0.1})
+            check("cap:recovers after close-all", res.get("ok") is True, str(res)[:150])
+            await call(s, "close", {"session_id": res.get("session_id", "")})
+
+            # ---- ssh_exec wall-clock timeout on a streaming command ----------
+            res = await call(s, "ssh_exec", {"host": "127.0.0.1", "port": sport,
+                                             "username": "root", "password": "boardpw",
+                                             "command": "slow-stream", "timeout": 1.0})
+            check("ssh_exec:wall-clock timeout", res.get("ok") is False
+                  and "TimedOut" in str(res.get("error", ""))
+                  and "chunk-0" in str(res.get("stdout", "")), str(res)[:250])
 
             # ---- error paths ------------------------------------------------
             res = await call(s, "connect", {"type": "ssh", "host": "127.0.0.1", "port": sport,
