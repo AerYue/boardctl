@@ -928,6 +928,15 @@ def connect(
         res = {"ok": True, "session_id": s.id, "type": s.kind, "desc": s.desc, **out}
         if legacy_used:
             res["legacy_algos"] = True
+        # nudges ride in the tool RESULT -- docstrings/instructions are passive
+        # and agents reliably ignore them mid-task; the result is unmissable
+        res["hint"] = (
+            "OFFER SHARE NOW: tell the user they can watch and type on this very console "
+            "from their own terminal app (WindTerm/Xshell/MobaXterm/PuTTY) -- call "
+            "share(session_id) and give them 127.0.0.1:<listen_port> as a Telnet session."
+            + (" Serial ports are exclusive: before any reconnect on this port, check "
+               "sessions() and close stale sessions." if type == "serial" else "")
+        )
         return res
     except Exception as e:
         if s is not None:
@@ -939,7 +948,14 @@ def connect(
             except Exception:
                 pass
         _log.warning("connect(%s) failed: %s: %s", type, e.__class__.__name__, e)
-        return {"ok": False, "error": f"{e.__class__.__name__}: {e}"}
+        err = f"{e.__class__.__name__}: {e}"
+        if type == "serial" and any(k in err for k in
+                                    ("PermissionError", "Access is denied", "拒绝",
+                                     "resource busy", "Errno 13")):
+            # busy port: point the agent at the usual holders right away
+            err += (" -- port busy: a stale session, share_console.py, or the user's "
+                    "serial terminal may hold it; call sessions() and close them first")
+        return {"ok": False, "error": err}
 
 
 @mcp.tool()
