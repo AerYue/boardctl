@@ -133,9 +133,12 @@ sftp_upload(host=..., local_path="app.bin", remote_path="/tmp/app.bin")
 **人机共享控制台**：
 
 ```
-（AI 侧）connect(...) → share(session_id)      # 返回 listen_port，如 3634
-（人侧）WindTerm/Xshell/MobaXterm 新建 Telnet 会话：127.0.0.1:3634
+（AI 侧）connect(...) → share(session_id)      # 返回 listen_port，默认 4023
+（人侧）WindTerm/Xshell/MobaXterm 新建 Telnet 会话：127.0.0.1:4023
 ```
+
+端口固定为基端口 **4023**（环境变量 `BOARDCTL_SHARE_PORT` 可改）；若被占用则自动向上
+累加到第一个空闲端口，实际端口以 `share()` 返回的 `listen_port` 为准。
 
 两边看到、操作的是同一个控制台：板子输出双向镜像，谁敲的命令对方都可见；
 最多 4 个终端同时接入；新接入者先收到最近 ~4KB 历史；回显由板子负责，终端不会双重显示。

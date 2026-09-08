@@ -51,6 +51,23 @@ MAX_BUFFER = 1_000_000  # per-session ring buffer ceiling (bytes)
 TRIM_TO = 600_000       # keep this many bytes after a trim
 MAX_SESSIONS = 16
 
+# share() listens on DEFAULT_SHARE_PORT unless told otherwise; a busy port walks
+# upward from there (see ConsoleBridge.__init__). Set BOARDCTL_SHARE_PORT to change
+# the base. SHARE_PORT_TRIES bounds how far the walk goes before giving up.
+SHARE_PORT_TRIES = 100
+
+
+def _default_share_port() -> int:
+    raw = os.environ.get("BOARDCTL_SHARE_PORT", "").strip()
+    try:
+        p = int(raw)
+    except ValueError:  # unset, empty or malformed -> keep the built-in default
+        return 4023
+    return p if 1 <= p <= 65535 else 4023
+
+
+DEFAULT_SHARE_PORT = _default_share_port()
+
 
 def _guide_path() -> str:
     """Absolute path of AI_GUIDE.md, for repo (src/../) and flat layouts alike."""
@@ -585,14 +602,38 @@ class ConsoleBridge:
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.clients: dict[tuple, dict] = {}
-        self.srv = socket.socket()
+        # port=0 -> start at the fixed default and walk upward past conflicts;
+        # an explicit port is honoured exactly (bind error surfaces to caller).
+        if port:
+            if not 1 <= port <= 65535:
+                raise ValueError(f"port must be 0-65535, got {port}")
+            candidates = [port]
+        else:
+            candidates = range(DEFAULT_SHARE_PORT,
+                               min(DEFAULT_SHARE_PORT + SHARE_PORT_TRIES, 65536))
+        last_err: Optional[Exception] = None
+        self.srv = None
+        for p in candidates:
+            srv = socket.socket()
+            try:
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: refuse if in use
+                    srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                else:  # POSIX: rebind after a recent close, but still detect live users
+                    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind(("127.0.0.1", p))
+                self.srv = srv
+                break
+            except Exception as e:
+                last_err = e
+                srv.close()
+        if self.srv is None:
+            span = f"{DEFAULT_SHARE_PORT}..{min(DEFAULT_SHARE_PORT + SHARE_PORT_TRIES, 65536) - 1}"
+            raise OSError(f"no free share port in {span}: {last_err}")
         try:
-            self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.srv.bind(("127.0.0.1", port))
             self.srv.listen(self.MAX_CLIENTS)
             self.srv.settimeout(0.5)
         except Exception:
-            self.srv.close()  # don't leak the socket on bind/listen failure
+            self.srv.close()  # don't leak the socket on listen failure
             raise
         self.port = self.srv.getsockname()[1]
         self.tap_id = session.add_tap(self._on_board_data)
@@ -1086,6 +1127,11 @@ def share(session_id: str, port: int = 0) -> dict:
     """Share a live session on 127.0.0.1:<port> (mini-telnet) so a human can
     watch and type in any terminal app (Xshell / MobaXterm / WindTerm / PuTTY)
     while the agent works on the same console through MCP.
+
+    Port choice: omitted/0 uses the fixed default (4023, override with the
+    BOARDCTL_SHARE_PORT env var); if that port is busy it walks upward until one
+    is free, so the address stays predictable across runs. Pass an explicit port
+    to force it exactly (bind failure is reported as an error).
 
     Offer this proactively right after connect() -- users usually don't know
     the feature exists. Board output is mirrored to all clients (up to 4);

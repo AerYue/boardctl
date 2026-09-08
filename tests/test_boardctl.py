@@ -502,12 +502,40 @@ async def main() -> int:
             check("connect:serial for share", res.get("ok"), str(res)[:200])
             ssid = res.get("session_id", "")
             await call(s, "send", {"session_id": ssid, "data": "early-marker", "wait": 0.5})
+            # probe the base port BEFORE sharing (the bridge itself will hold it)
+            _probe = socket.socket()
+            try:
+                _probe.bind(("127.0.0.1", b.DEFAULT_SHARE_PORT))
+                base_free = True
+            except OSError:
+                base_free = False
+            finally:
+                _probe.close()
             res = await call(s, "share", {"session_id": ssid})
             check("share:ok", res.get("ok") and res.get("listen_port"), str(res)[:200])
             bport = res.get("listen_port", 0)
+            # the base port must be free for the exact-match assertion; if this
+            # machine happens to hold it, the walk-up guarantee still applies
+            if base_free:
+                check("share:default port is fixed base", bport == b.DEFAULT_SHARE_PORT,
+                      f"listen_port={bport} base={b.DEFAULT_SHARE_PORT}")
+            else:
+                check("share:default port is fixed base",
+                      bport > b.DEFAULT_SHARE_PORT, f"base busy, walked to {bport}")
             res = await call(s, "share", {"session_id": ssid})
             check("share:re-share same port", res.get("ok") and res.get("listen_port") == bport,
                   str(res)[:200])
+
+            # a second session sharing while the base port is held must walk upward
+            res2 = await call(s, "connect", {"type": "serial", "serial_port": "loop://",
+                                             "baudrate": 115200, "wait_after": 0.3})
+            ssid2 = res2.get("session_id", "")
+            res2 = await call(s, "share", {"session_id": ssid2})
+            check("share:conflict walks upward",
+                  res2.get("ok") and res2.get("listen_port") == bport + 1,
+                  f"first={bport} second={res2.get('listen_port')}")
+            res2 = await call(s, "close", {"session_id": ssid2})
+            check("share:conflict session closed", res2.get("ok"), str(res2)[:150])
 
             cli = socket.create_connection(("127.0.0.1", bport), timeout=5)
 
