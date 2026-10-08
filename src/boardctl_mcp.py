@@ -50,24 +50,7 @@ if not _log.handlers:
 MAX_BUFFER = 1_000_000  # per-session ring buffer ceiling (bytes)
 TRIM_TO = 600_000       # keep this many bytes after a trim
 MAX_SESSIONS = 16
-
-# share() listens on DEFAULT_SHARE_PORT unless told otherwise; a busy port walks
-# upward from there (see ConsoleBridge.__init__). Set BOARDCTL_SHARE_PORT to change
-# the base. SHARE_PORT_TRIES bounds how far the walk goes before giving up.
-SHARE_PORT_TRIES = 100
-
-
-def _default_share_port() -> int:
-    raw = os.environ.get("BOARDCTL_SHARE_PORT", "").strip()
-    try:
-        p = int(raw)
-    except ValueError:  # unset, empty or malformed -> keep the built-in default
-        return 4023
-    return p if 1 <= p <= 65535 else 4023
-
-
-DEFAULT_SHARE_PORT = _default_share_port()
-
+SHARE_PORT_BASE = 4023   # default share() listen port; walk +1..+9 when busy
 
 def _guide_path() -> str:
     """Absolute path of AI_GUIDE.md, for repo (src/../) and flat layouts alike."""
@@ -286,12 +269,18 @@ class Session:
             }
 
     def close(self) -> None:
+        # Signal the reader thread BEFORE tearing down the transport: closing the
+        # port under a live read() is what made pyserial raise AttributeError in
+        # the reader (G0-B §11-8, T14 deploy). alive=False stops the loop at the
+        # next check; join() lets the in-flight read (0.1 s timeout) drain first.
+        self._die("closed by user")
+        t = self._thread
+        if t is not None and t is not threading.current_thread() and t.is_alive():
+            t.join(timeout=1.0)
         try:
             self._close_io()
         except Exception as e:  # best effort
             _log.warning("session %s: close error %s", self.id, e)
-        finally:
-            self._die("closed by user")
         _log.info("session %s closed", self.id)
 
 
@@ -334,6 +323,13 @@ class SerialSession(Session):
                     data = self.ser.read(self.ser.in_waiting or 1)
                 except (serial.SerialException, OSError) as e:
                     self._die(f"serial read error: {e}")
+                    return
+                except Exception as e:
+                    # close() can tear the port down while this thread is inside
+                    # read()/in_waiting(); pyserial then raises AttributeError
+                    # instead of SerialException (seen in the wild, G0-B §11-8
+                    # and T14 deploy). Swallow it here -- teardown is intended.
+                    self._die(f"serial read error (closed mid-read): {e!r}")
                     return
                 if data:
                     self._feed(data)
@@ -585,6 +581,17 @@ BRIDGES: dict[str, "ConsoleBridge"] = {}
 BRIDGE_LOCK = threading.Lock()
 
 
+def _port_accepting(port: int) -> bool:
+    """True if something on 127.0.0.1:<port> accepts connections.
+
+    Windows SO_REUSEADDR lets a second bind() succeed even on a live listener,
+    so "is the share port busy" must be probed with a connect, not a bind.
+    """
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
 class ConsoleBridge:
     """Expose one session on 127.0.0.1:<port> as a mini-telnet server, so a
     human can watch and type in any terminal app (Xshell / MobaXterm / WindTerm
@@ -602,38 +609,14 @@ class ConsoleBridge:
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.clients: dict[tuple, dict] = {}
-        # port=0 -> start at the fixed default and walk upward past conflicts;
-        # an explicit port is honoured exactly (bind error surfaces to caller).
-        if port:
-            if not 1 <= port <= 65535:
-                raise ValueError(f"port must be 0-65535, got {port}")
-            candidates = [port]
-        else:
-            candidates = range(DEFAULT_SHARE_PORT,
-                               min(DEFAULT_SHARE_PORT + SHARE_PORT_TRIES, 65536))
-        last_err: Optional[Exception] = None
-        self.srv = None
-        for p in candidates:
-            srv = socket.socket()
-            try:
-                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: refuse if in use
-                    srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-                else:  # POSIX: rebind after a recent close, but still detect live users
-                    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                srv.bind(("127.0.0.1", p))
-                self.srv = srv
-                break
-            except Exception as e:
-                last_err = e
-                srv.close()
-        if self.srv is None:
-            span = f"{DEFAULT_SHARE_PORT}..{min(DEFAULT_SHARE_PORT + SHARE_PORT_TRIES, 65536) - 1}"
-            raise OSError(f"no free share port in {span}: {last_err}")
+        self.srv = socket.socket()
         try:
+            self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.srv.bind(("127.0.0.1", port))
             self.srv.listen(self.MAX_CLIENTS)
             self.srv.settimeout(0.5)
         except Exception:
-            self.srv.close()  # don't leak the socket on listen failure
+            self.srv.close()  # don't leak the socket on bind/listen failure
             raise
         self.port = self.srv.getsockname()[1]
         self.tap_id = session.add_tap(self._on_board_data)
@@ -1128,17 +1111,16 @@ def share(session_id: str, port: int = 0) -> dict:
     watch and type in any terminal app (Xshell / MobaXterm / WindTerm / PuTTY)
     while the agent works on the same console through MCP.
 
-    Port choice: omitted/0 uses the fixed default (4023, override with the
-    BOARDCTL_SHARE_PORT env var); if that port is busy it walks upward until one
-    is free, so the address stays predictable across runs. Pass an explicit port
-    to force it exactly (bind failure is reported as an error).
-
     Offer this proactively right after connect() -- users usually don't know
     the feature exists. Board output is mirrored to all clients (up to 4);
     client input goes to the board; each client receives the last ~4 KB of
     history on connect. Bound to localhost only. Returns listen_port -- point
     the terminal's Telnet session at 127.0.0.1:<listen_port>. Sharing stops
     with unshare() or when the session is closed.
+
+    port defaults to 0 = auto: prefer fixed port 4023 (stable across runs,
+    so terminal bookmarks/macros keep working), walk +1..+9 when busy, then
+    fall back to an OS-assigned port. Pass an explicit port to pin it.
     """
     try:
         s = _get(session_id)
@@ -1157,7 +1139,25 @@ def share(session_id: str, port: int = 0) -> dict:
                 if port and port != existing.port:
                     res["note"] += f" (requested port {port} ignored)"
                 return res
-            br = ConsoleBridge(s, port)
+            # port 0 = auto: fixed base first (stable for the user's terminal
+            # config), step aside while busy, ephemeral as the last resort.
+            ports = ([port] if port else
+                     [SHARE_PORT_BASE + i for i in range(10)] + [0])
+            br = last_err = None
+            for p in ports:
+                if p and _port_accepting(p):
+                    last_err = OSError(f"port {p} busy")
+                    continue
+                try:
+                    br = ConsoleBridge(s, p)
+                    break
+                except OSError as e:
+                    last_err = e
+            if br is None:
+                if port:
+                    raise OSError(f"share port {port} busy: a stale session, "
+                                  "share_console.py, or the user's terminal may hold it")
+                raise OSError(f"share: no listen port available ({last_err})")
             BRIDGES[session_id] = br
         _log.info("session %s shared on 127.0.0.1:%d", session_id, br.port)
         return {"ok": True, "session_id": session_id, "listen_port": br.port,

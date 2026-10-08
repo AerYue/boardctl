@@ -34,7 +34,7 @@ boardctl 是一个 MCP server，让 AI 编程助手（ZCode、Claude、Cursor �
 | `read(session_id, timeout)` | 读取新输出（开机日志、异步消息） |
 | `expect(session_id, patterns)` | **等待正则出现**（`login:`、`~#`、`Hit any key`...），控制台自动化核心 |
 | `control_lines(session_id, dtr, rts)` | 拉拉 DTR/RTS 控制线（板子复位、进 bootloader），仅串口会话 |
-| `share(session_id, port)` / `unshare(session_id)` | **人机共享**：把会话暴露成本地 Telnet 口，终端软件接入同一控制台 |
+| `share(session_id, port)` / `unshare(session_id)` | **人机共享**：把会话暴露成本地 Telnet 口（默认固定 4023，占用时 +1 顺延），终端软件接入同一控制台 |
 | `sessions()` / `close(session_id)` | 会话管理（`sessions()` 标出已共享端口） |
 | `ssh_exec(host, username, command)` | 一次性 SSH 执行（免会话，回 stdout/stderr/exit_code） |
 | `sftp_upload` / `sftp_download` | 一次性 SFTP 传文件（推固件 / 拉日志） |
@@ -133,12 +133,9 @@ sftp_upload(host=..., local_path="app.bin", remote_path="/tmp/app.bin")
 **人机共享控制台**：
 
 ```
-（AI 侧）connect(...) → share(session_id)      # 返回 listen_port，默认 4023
+（AI 侧）connect(...) → share(session_id)      # 默认固定 127.0.0.1:4023（被占用自动 +1）
 （人侧）WindTerm/Xshell/MobaXterm 新建 Telnet 会话：127.0.0.1:4023
 ```
-
-端口固定为基端口 **4023**（环境变量 `BOARDCTL_SHARE_PORT` 可改）；若被占用则自动向上
-累加到第一个空闲端口，实际端口以 `share()` 返回的 `listen_port` 为准。
 
 两边看到、操作的是同一个控制台：板子输出双向镜像，谁敲的命令对方都可见；
 最多 4 个终端同时接入；新接入者先收到最近 ~4KB 历史；回显由板子负责，终端不会双重显示。
@@ -172,6 +169,7 @@ legacy 垫片重试一次，成功后结果标记 `"legacy_algos": true`；也�
 | 单次返回截断 | send 8000 字符 / read 16000 / expect 4000 / connect 8000（保留尾部，`truncated`+`dropped_chars` 标记） |
 | ssh_exec | 每流 32KB；整条命令受 timeout 墙钟限制（超时返回已收到的部分输出） |
 | 共享桥客户端 | 每会话 4 个，仅 127.0.0.1 |
+| 共享端口 | 默认固定 4023，被占用时 +1 顺延（4023–4032），全忙退回随机；也可 `share(..., port=xxxx)` 指定 |
 | 串口默认参数 | 115200-8N1，无流控 |
 | 编码 | 默认 utf-8（可按会话指定，如 `encoding="gb18030"`） |
 

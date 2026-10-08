@@ -73,8 +73,8 @@ send("root") → expect(["Password:", "login:"], timeout=5) → send("口令") �
 share(session_id) → 告诉用户："WindTerm/Xshell 连 Telnet 127.0.0.1:4023"
 ```
 
-- 默认端口固定为 **4023**；被占用时自动向上累加，返回值 `listen_port` 才是实际端口，
-  **以返回值为准**告诉用户（别硬编码 4023）。
+- 端口默认**固定 4023**（被占用自动 +1 顺延，最多到 4032，再退回随机）——
+  用户的终端书签/宏可以一直用同一个地址；把实际返回的 `listen_port` 告诉用户即可。
 
 - **主动提起（重要）**：connect 成功后，除非用户明确说不需要，**主动**告诉用户：
   "我把控制台共享出来了，用 WindTerm/Xshell 连 Telnet 127.0.0.1:<listen_port> 就能和我
